@@ -84,10 +84,12 @@ const auth_header = 'Basic ' + Buffer.from(auth_string).toString('base64');
         });
         console.log("Page loaded...");
 
-        page.on('console', msg => {
-            for (let i = 0; i < msg.args().length; ++i)
-                msg.args()[i].jsonValue().then(val => console.log(`[Browser console] ${msg.type()}:`, val));
-        });
+        if(process.env.DEBUG_MODE === 'true') {
+            page.on('console', msg => {
+                for (let i = 0; i < msg.args().length; ++i)
+                    msg.args()[i].jsonValue().then(val => console.log(`[Browser console] ${msg.type()}:`, val));
+            });
+        }
 
         let dashboardName = 'output_grafana';
         let date = new Date().toISOString().split('T')[0];
@@ -655,100 +657,197 @@ const auth_header = 'Basic ' + Buffer.from(auth_string).toString('base64');
             await page.evaluate(async () => {
                 if (scrollableSection) {
                     console.log("Scrolling to the bottom of the page to trigger all queries...");
-                    const totalScrollHeight = scrollableSection.scrollHeight;
+                    const totalHeight = scrollableSection.scrollHeight;
                     const viewportHeight = window.innerHeight;
-                    let scrollPosition = 0;
-
-                    while (scrollPosition < totalScrollHeight) {
+                    let scrolled = 0;
+                    while (scrolled < totalHeight) {
                         scrollableSection.scrollBy(0, viewportHeight);
-                        scrollPosition += viewportHeight;
-                        await new Promise(resolve => setTimeout(resolve, 500));
+                        scrolled += viewportHeight;
+                        await new Promise(res => setTimeout(res, 500));
                     }
                 }
             });
 
-            const excludedTypes = ['text'];
-
-            function countValidPanels(panels) {
-                let count = 0;
-
-                for (const panel of panels) {
-                    if (excludedTypes.includes(panel.type)) continue;
-
-                    if (panel.datasource) count++;
-
-                    if (panel.type === 'row' && Array.isArray(panel.panels)) {
-                        count += countValidPanels(panel.panels);
-                    }
+            const dashboardQueryInfo = await page.evaluate(async (excludedTypes) => {
+                const dashboardRequest = performance.getEntriesByType("resource")
+                    .find(r => r.initiatorType === 'fetch' && r.name.includes('/dashboards/uid/'));
+                if (!dashboardRequest) {
+                    throw new Error("Unable to find Grafana dashboard data request in network traces.");
                 }
 
-                return count;
-            }
-
-            const panelQueryCount = await page.evaluate(async (excludedTypes) => {
-                const url = window.performance.getEntriesByType("resource")
-                    .find(request => request.initiatorType === 'fetch' && request.name.includes('/dashboards/uid/')).name;
-
-                const response = await fetch(url);
+                const response = await fetch(dashboardRequest.name);
                 const json = await response.json();
-                const panels = json.dashboard.panels || [];
+                const panels = json.dashboard?.panels || [];
+                const templating = json.dashboard?.templating?.list || [];
 
-                function countValidPanels(panels) {
-                    let count = 0;
-
+                function collectValidPanels(panels) {
+                    let valid = 0;
                     for (const panel of panels) {
                         if (excludedTypes.includes(panel.type)) continue;
-                        if (panel.datasource) count++;
                         if (panel.type === 'row' && Array.isArray(panel.panels)) {
-                            count += countValidPanels(panel.panels);
+                            valid += collectValidPanels(panel.panels);
+                            continue;
                         }
+                        if (panel.datasource) valid++;
                     }
-
-                    return count;
+                    return valid;
                 }
 
-                const total = countValidPanels(panels);
-                console.log(`Total Panel Queries Expected: ${total}`);
-                return total;
-            }, excludedTypes);
+                const validPanels = collectValidPanels(panels);
 
-            const maxWaitTime = process.env.CHECK_QUERIES_TO_COMPLETE_QUERIES_COMPLETION_TIMEOUT || 60000;
-            const interval = process.env.CHECK_QUERIES_TO_COMPLETE_QUERIES_INTERVAL || 4000;
+                const templatingQueries = templating.filter(v =>
+                    v.type === 'query'
+                );
+
+                console.log(`Panel summary — Valid: ${validPanels}`);
+                console.log(`Templating variables with queries: ${templatingQueries.length}`);
+                console.log(`✅ Total Expected Queries: ${validPanels + templatingQueries.length}`);
+
+                return {
+                    valid: validPanels,
+                    templating: templatingQueries.length
+                };
+            }, ['text']);
+
+            const panelErrorSelectors = [
+                '.panel-content .alert-error',
+                '.panel-content .panel-error',
+                '.panel-content .panel-alert-error',
+                '.react-panel-error',
+                '[data-testid="panel-error-container"]',
+                '.panel-content .render-error',
+                '.react-grid-item div[data-testid*="header-container"] button[data-testid*="status error"]'
+            ];
+
+            const panelErrorCount = await page.evaluate((selectors) => {
+                const matchedErrors = selectors.flatMap(selector =>
+                    Array.from(document.querySelectorAll(selector))
+                );
+
+                const uniquePanels = new Set();
+
+                matchedErrors.forEach(errEl => {
+                    const panel =
+                        errEl.closest('.panel-container') ||
+                        errEl.closest('.panel') ||
+                        errEl.closest('[data-testid*="panel"]') ||
+                        errEl.closest('.react-grid-item');
+
+                    if (panel) {
+                        uniquePanels.add(panel);
+
+                        const titleSelectors = [
+                            'div[class*="panel-title"] h2',
+                            '[data-testid="panel-title"]',
+                            '.panel-header span',
+                            'h2', 'h3', 'h4',
+                        ];
+
+                        let title = '[Untitled Panel]';
+                        for (const selector of titleSelectors) {
+                            const el = panel.querySelector(selector);
+                            if (el?.textContent?.trim()) {
+                                title = el.textContent.trim();
+                                break;
+                            }
+                        }
+
+                        console.log(`🛑 Panel with error detected: "${title}"`);
+                    }
+                });
+
+                console.log(`🛑 Total panels with errors: ${uniquePanels.size}`);
+                return uniquePanels.size;
+            }, panelErrorSelectors);
+
+            const variableErrorSelectors = [
+                'div[data-testid*="template variable"] label svg',
+            ];
+
+            const variableQueryErrorCount = await page.evaluate((selectors) => {
+                const matched = selectors.flatMap(sel => Array.from(document.querySelectorAll(sel)));
+
+                const variableWrappers = new Set();
+
+                matched.forEach(el => {
+                    const variableWrapper = el.closest('.variable-wrapper') ||
+                        el.closest('.template-variable-wrapper') ||
+                        el.closest('div[data-testid*="template variable"]');
+
+                    if (variableWrapper) {
+                        variableWrappers.add(variableWrapper);
+                        const titleSelectors = [
+                            'span.variable-label',
+                            'label[data-testid*="template variable"]',
+                            '.variable-name',
+                            '.variable-title'
+                        ];
+                        let title = '[Untitled Variable]';
+                        for (const selector of titleSelectors) {
+                            const el = variableWrapper.querySelector(selector);
+                            if (el?.textContent?.trim()) {
+                                title = el.textContent.trim();
+                                break;
+                            }
+                        }
+                        console.log(`🛑 Variable with query error detected: "${title}"`);
+                    }
+                });
+
+                console.log(`🛑 Variables with query errors detected: ${variableWrappers.size}`);
+                return variableWrappers.size;
+            }, variableErrorSelectors);
+
+            const panelCountFromJson = dashboardQueryInfo.valid;
+            const variableQueryCount = dashboardQueryInfo.templating;
+
+            const effectiveVariableQueryCount = Math.max(0, variableQueryCount - variableQueryErrorCount);
+
+            const effectivePanelQueryCount = Math.max(0, (panelCountFromJson - panelErrorCount)) + effectiveVariableQueryCount;
+
+            const maxWaitTime = parseInt(process.env.CHECK_QUERIES_TO_COMPLETE_QUERIES_COMPLETION_TIMEOUT, 10) || 60000;
+            const maxStableWait = parseInt(process.env.CHECK_QUERIES_TO_COMPLETE_MAX_QUERY_COMPLETION_TIME, 10) || 30000;
+            const interval = parseInt(process.env.CHECK_QUERIES_TO_COMPLETE_QUERIES_INTERVAL, 10) || 4000;
+
             let elapsedTime = 0;
             let lastCompletedCount = 0;
             let stableCountTime = 0;
 
+            console.log(`Waiting for queries to complete... Expected: ${effectivePanelQueryCount}, Timeout: ${maxWaitTime}ms, Interval: ${interval}ms`);
+
             while (elapsedTime < maxWaitTime) {
-                const completedQueryCount = await page.evaluate(() => {
-                    return window.performance.getEntriesByType("resource")
-                        .filter(request => (request.initiatorType === 'fetch' && request.name.includes('query?'))).length;
-                });
+                const completedQueryCount = await page.evaluate(() =>
+                    performance.getEntriesByType("resource")
+                        .filter(r => r.initiatorType === 'fetch' && r.name.includes('query')).length
+                );
 
-                console.log(`Completed Queries: ${completedQueryCount} / ${panelQueryCount}`);
+                console.log(`Completed Queries: ${completedQueryCount} / ${effectivePanelQueryCount}`);
 
-                if (completedQueryCount === panelQueryCount) {
-                    console.log("All queries have completed.");
+                if (completedQueryCount >= effectivePanelQueryCount) {
+                    console.log("All expected queries have completed.");
                     break;
                 }
 
                 if (completedQueryCount === lastCompletedCount) {
                     stableCountTime += interval;
-                    if (stableCountTime >= process.env.CHECK_QUERIES_TO_COMPLETE_MAX_QUERY_COMPLETION_TIME || 30000) {
-                        throw new Error("Query completion seems to be stuck. Exiting after no progress for " + process.env.CHECK_QUERIES_TO_COMPLETE_MAX_QUERY_COMPLETION_TIME +"ms.");
+                    if (stableCountTime >= maxStableWait) {
+                        throw new Error(`❌ Query completion seems stuck — no progress after ${maxStableWait}ms.`);
                     }
                 } else {
                     stableCountTime = 0;
                 }
 
                 lastCompletedCount = completedQueryCount;
-                await new Promise(resolve => setTimeout(resolve, interval));
+                await new Promise(res => setTimeout(res, interval));
                 elapsedTime += interval;
+                console.log(`Waiting... Elapsed: ${elapsedTime}ms`);
             }
 
             if (elapsedTime >= maxWaitTime) {
-                throw new Error("Timeout: Not all queries completed within the allowed time.");
+                throw new Error("Timeout: Not all queries completed in time.");
             }
         }
+
 
         // Add a final check for all panels and ensure they're visible
         await page.evaluate(async () => {

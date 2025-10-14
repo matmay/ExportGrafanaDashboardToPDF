@@ -671,44 +671,43 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
             });
 
             const dashboardQueryInfo = await page.evaluate(async (excludedTypes) => {
-                const dashboardRequest = performance.getEntriesByType("resource")
-                    .find(r => r.initiatorType === 'fetch' && r.name.includes('/dashboards/uid/'));
-                if (!dashboardRequest) {
-                    throw new Error("Unable to find Grafana dashboard data request in network traces.");
-                }
+                const entry = performance.getEntriesByType("resource").find(r => {
+                    if (!['fetch','xmlhttprequest'].includes(r.initiatorType)) return false;
+                    const u = r.name;
+                    return /\/api\/dashboards\/uid\/[^/?#]+/.test(u) ||
+                        /\/apis\/dashboard\.grafana\.app\/v1beta1\/namespaces\/[^/]+\/dashboards\/[^/]+\/dto(?:\?|$)/.test(u);
+                });
+                if (!entry) throw new Error("Dashboard request not found.");
 
-                const response = await fetch(dashboardRequest.name);
-                const json = await response.json();
-                const panels = json.dashboard?.panels || [];
-                const templating = json.dashboard?.templating?.list || [];
+                const res = await fetch(entry.name, { credentials: 'include' });
+                if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+                const json = await res.json();
 
-                function collectValidPanels(panels) {
-                    let valid = 0;
-                    for (const panel of panels) {
-                        if (excludedTypes.includes(panel.type)) continue;
-                        if (panel.type === 'row' && Array.isArray(panel.panels)) {
-                            valid += collectValidPanels(panel.panels);
-                            continue;
-                        }
-                        if (panel.datasource) valid++;
+                const root =
+                    json?.spec ??
+                    json?.model ??
+                    json?.dashboard ??
+                    json;
+
+                const panels = Array.isArray(root?.panels) ? root.panels : [];
+                const templating = root?.templating?.list ?? [];
+
+                function countPanels(list) {
+                    let n = 0;
+                    for (const p of list) {
+                        if (!p || excludedTypes.includes(p.type)) continue;
+                        if (p.type === 'row' && Array.isArray(p.panels)) { n += countPanels(p.panels); continue; }
+                        const hasDs = !!p.datasource || (Array.isArray(p.targets) && p.targets.some(t => t?.datasource));
+                        if (hasDs) n++;
                     }
-                    return valid;
+                    return n;
                 }
 
-                const validPanels = collectValidPanels(panels);
+                const valid = countPanels(panels);
+                const templatingQueries = templating.filter(v => v?.type === 'query').length;
 
-                const templatingQueries = templating.filter(v =>
-                    v.type === 'query'
-                );
-
-                console.log(`Panel summary — Valid: ${validPanels}`);
-                console.log(`Templating variables with queries: ${templatingQueries.length}`);
-                console.log(`✅ Total Expected Queries: ${validPanels + templatingQueries.length}`);
-
-                return {
-                    valid: validPanels,
-                    templating: templatingQueries.length
-                };
+                console.log(`✔ Expected queries: ${valid + templatingQueries}`);
+                return { valid, templating: templatingQueries };
             }, ['text']);
 
             const panelErrorSelectors = [

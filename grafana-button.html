@@ -6,6 +6,8 @@
 
         window.gfexpPdfGenerationServerUrl = 'http://localhost:3001';
         window.gfexpLanguage = 'en'; // fr or en
+        window.gfexpPdfWidthMin = 100;
+        window.gfexpPdfWidthMax = 10000;
 
         window.gfexpLangs = {
             fr: {
@@ -817,7 +819,7 @@
                     <span class="css-1qya104-Label-description">${window.gfexpLangs[window.gfexpLang].pdfWidthDescription}</span>
                 </label></div>
                 <div>
-                    <input type="number" class="GFEXP_text_input" id="gfexpPdfWidth" placeholder="1920" min="100" max="10000">
+                    <input type="number" class="GFEXP_text_input" id="gfexpPdfWidth" placeholder="1920" min="${window.gfexpPdfWidthMin}" max="${window.gfexpPdfWidthMax}">
                 </div>
             </div>
         </div>
@@ -935,7 +937,7 @@
                         let pdfWidthPx = null;
                         if (pdfWidthInput && /^\d+$/.test(pdfWidthInput)) {
                             const parsedWidth = parseInt(pdfWidthInput, 10);
-                            if (parsedWidth >= 100 && parsedWidth <= 10000) {
+                            if (parsedWidth >= window.gfexpPdfWidthMin && parsedWidth <= window.gfexpPdfWidthMax) {
                                 pdfWidthPx = parsedWidth;
                             }
                         }

@@ -1004,7 +1004,7 @@
                             gfexpDownloadPdfButton.setAttribute('disabled', 'true');
 
                             const requestBody = { url };
-                            if (pdfWidthPx && !isNaN(pdfWidthPx) && pdfWidthPx > 0) {
+                            if (pdfWidthPx) {
                                 requestBody.pdfWidthPx = pdfWidthPx;
                             }
 

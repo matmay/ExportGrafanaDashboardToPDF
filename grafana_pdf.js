@@ -3,6 +3,24 @@
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 
+// Shared panel and container selectors for different Grafana versions
+const PANEL_SELECTORS = [
+    '[data-testid="panel"]',
+    '.panel-container',
+    '.react-grid-item',
+    '.dashboard-panel'
+];
+
+const CONTAINER_SELECTORS = [
+    '#pageContent div[class*="canvas-wrapper-old"]',
+    '[data-testid="dashboard-grid"]',
+    '[data-testid="scrollbar-view"]',
+    '.scrollbar-view',
+    '.react-grid-layout',
+    'main',
+    'body'
+];
+
 console.log("Script grafana_pdf.js started...");
 
 const args = process.argv.slice(2);
@@ -950,17 +968,20 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
         if (maxPageHeight && maxPageHeight > 0) {
             console.log(`Multi-page PDF mode enabled with max page height: ${maxPageHeight}px`);
             
-            // Get panel boundaries for smart page breaks
-            const panelBoundaries = await page.evaluate(() => {
-                const panelSelectors = [
-                    '[data-testid="panel"]',
-                    '.panel-container',
-                    '.react-grid-item',
-                    '.dashboard-panel'
-                ];
+            // Get panel boundaries for smart page breaks using absolute document coordinates
+            const panelBoundaries = await page.evaluate((selectors) => {
+                // Helper function to get absolute position in document
+                function getAbsoluteTop(element) {
+                    let top = 0;
+                    while (element) {
+                        top += element.offsetTop;
+                        element = element.offsetParent;
+                    }
+                    return top;
+                }
                 
                 let panels = [];
-                for (const selector of panelSelectors) {
+                for (const selector of selectors) {
                     const elements = document.querySelectorAll(selector);
                     if (elements && elements.length > 0) {
                         panels = Array.from(elements);
@@ -975,15 +996,16 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
                 }
                 
                 return panels.map((panel, idx) => {
-                    const rect = panel.getBoundingClientRect();
+                    const absoluteTop = getAbsoluteTop(panel);
+                    const height = panel.offsetHeight;
                     return {
                         index: idx,
-                        top: rect.top,
-                        bottom: rect.bottom,
-                        height: rect.height
+                        top: absoluteTop,
+                        bottom: absoluteTop + height,
+                        height: height
                     };
                 }).sort((a, b) => a.top - b.top);
-            });
+            }, PANEL_SELECTORS);
             
             console.log(`Found ${panelBoundaries.length} panels for page break calculation`);
             
@@ -1051,18 +1073,7 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
             
             // Inject page break markers at calculated positions
             if (pageBreaks.length > 0) {
-                await page.evaluate((breaks) => {
-                    // Find the main scrollable content container
-                    const containerSelectors = [
-                        '#pageContent div[class*="canvas-wrapper-old"]',
-                        '[data-testid="dashboard-grid"]',
-                        '[data-testid="scrollbar-view"]',
-                        '.scrollbar-view',
-                        '.react-grid-layout',
-                        'main',
-                        'body'
-                    ];
-                    
+                await page.evaluate((breaks, containerSelectors) => {
                     let container = null;
                     for (const selector of containerSelectors) {
                         container = document.querySelector(selector);
@@ -1088,7 +1099,7 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
                     }
                     
                     console.log(`Inserted ${breaks.length} page break markers`);
-                }, pageBreaks);
+                }, pageBreaks, CONTAINER_SELECTORS);
             }
             
             await page.pdf({

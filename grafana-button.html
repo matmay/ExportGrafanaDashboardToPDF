@@ -36,6 +36,7 @@
                 "tryingToConnect": "Tentative de connexion au serveur PDF...",
                 "pdfWidth": "Largeur du PDF (px)",
                 "pdfWidthDescription": "Laissez vide pour utiliser la valeur par défaut du serveur.",
+                "pdfWidthInvalid": "La largeur du PDF doit être un nombre entre {min} et {max} pixels.",
             },
             en: {
                 "exportAsPdf": "Export as PDF",
@@ -63,6 +64,7 @@
                 "tryingToConnect": "Trying to connect to the PDF server...",
                 "pdfWidth": "PDF width (px)",
                 "pdfWidthDescription": "Leave empty to use server default.",
+                "pdfWidthInvalid": "PDF width must be a number between {min} and {max} pixels.",
             }
         };
 
@@ -935,12 +937,41 @@
                         let lockTimeRange = drawer.querySelector('#gfexpDownloadPdfThemeCurrentTimeRange').checked;
                         let pdfWidthInput = drawer.querySelector('#gfexpPdfWidth').value.trim();
                         let pdfWidthPx = null;
-                        if (pdfWidthInput && /^\d+$/.test(pdfWidthInput)) {
-                            const parsedWidth = parseInt(pdfWidthInput, 10);
-                            if (parsedWidth >= window.gfexpPdfWidthMin && parsedWidth <= window.gfexpPdfWidthMax) {
-                                pdfWidthPx = parsedWidth;
+                        const errorContainer = drawer.querySelector('#GFEXP_error');
+                        
+                        function showWidthError() {
+                            const errorMessage = window.gfexpLangs[window.gfexpLang].pdfWidthInvalid
+                                .replace('{min}', window.gfexpPdfWidthMin)
+                                .replace('{max}', window.gfexpPdfWidthMax);
+                            const errorDiv = document.createElement('div');
+                            errorDiv.className = 'GFEXP_error_content';
+                            const errorP = document.createElement('p');
+                            errorP.textContent = errorMessage;
+                            errorDiv.appendChild(errorP);
+                            errorContainer.innerHTML = '';
+                            errorContainer.appendChild(errorDiv);
+                            marker.setAttribute('data-gfexp-waiting', 'false');
+                        }
+                        
+                        if (pdfWidthInput) {
+                            if (/^\d+$/.test(pdfWidthInput)) {
+                                const parsedWidth = parseInt(pdfWidthInput, 10);
+                                if (parsedWidth >= window.gfexpPdfWidthMin && parsedWidth <= window.gfexpPdfWidthMax) {
+                                    pdfWidthPx = parsedWidth;
+                                } else {
+                                    showWidthError();
+                                    return;
+                                }
+                            } else {
+                                showWidthError();
+                                return;
                             }
                         }
+                        
+                        if (errorContainer) {
+                            errorContainer.innerHTML = '';
+                        }
+                        
                         console.log("[GFEXP] Theme:", theme);
                         console.log("[GFEXP] Lock time range:", lockTimeRange);
                         console.log("[GFEXP] PDF width:", pdfWidthPx);

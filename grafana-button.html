@@ -931,8 +931,14 @@
 
                         let theme = drawer.querySelector('input[name="gfexpDownloadPdfTheme"]:checked').id;
                         let lockTimeRange = drawer.querySelector('#gfexpDownloadPdfThemeCurrentTimeRange').checked;
-                        let pdfWidthInput = drawer.querySelector('#gfexpPdfWidth').value;
-                        let pdfWidthPx = pdfWidthInput ? parseInt(pdfWidthInput, 10) : null;
+                        let pdfWidthInput = drawer.querySelector('#gfexpPdfWidth').value.trim();
+                        let pdfWidthPx = null;
+                        if (pdfWidthInput && /^\d+$/.test(pdfWidthInput)) {
+                            const parsedWidth = parseInt(pdfWidthInput, 10);
+                            if (parsedWidth >= 100 && parsedWidth <= 10000) {
+                                pdfWidthPx = parsedWidth;
+                            }
+                        }
                         console.log("[GFEXP] Theme:", theme);
                         console.log("[GFEXP] Lock time range:", lockTimeRange);
                         console.log("[GFEXP] PDF width:", pdfWidthPx);
@@ -1004,7 +1010,7 @@
                             gfexpDownloadPdfButton.setAttribute('disabled', 'true');
 
                             const requestBody = { url };
-                            if (pdfWidthPx && !isNaN(pdfWidthPx) && pdfWidthPx > 0) {
+                            if (pdfWidthPx) {
                                 requestBody.pdfWidthPx = pdfWidthPx;
                             }
 

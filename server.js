@@ -24,7 +24,7 @@ app.get('/check-status', (req, res) => {
   res.send('Server is running');
 });
 app.post('/generate-pdf', (req, res) => {
-  let { url: requestUrl, from, to, pdfWidthPx, pdfHeightPx } = req.body;
+  let { url: requestUrl, from, to, pdfWidthPx, pdfHeightPx, pdfMaxPageHeightPx } = req.body;
 
   if (!requestUrl) {
     return res.status(400).send('URL is required');
@@ -45,6 +45,7 @@ app.post('/generate-pdf', (req, res) => {
 
   if (pdfWidthPx) args.push(`--pdfWidthPx=${pdfWidthPx}`);
   if (pdfHeightPx) args.push(`--pdfHeightPx=${pdfHeightPx}`);
+  if (pdfMaxPageHeightPx) args.push(`--pdfMaxPageHeightPx=${pdfMaxPageHeightPx}`);
 
   const script = fork('grafana_pdf.js', args);
 

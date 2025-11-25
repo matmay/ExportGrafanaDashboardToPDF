@@ -2,6 +2,25 @@
 
 const puppeteer = require('puppeteer');
 const fs = require('fs');
+const { PDFDocument } = require('pdf-lib');
+
+// Shared panel and container selectors for different Grafana versions
+const PANEL_SELECTORS = [
+    '[data-testid="panel"]',
+    '.panel-container',
+    '.react-grid-item',
+    '.dashboard-panel'
+];
+
+const CONTAINER_SELECTORS = [
+    '#pageContent div[class*="canvas-wrapper-old"]',
+    '[data-testid="dashboard-grid"]',
+    '[data-testid="scrollbar-view"]',
+    '.scrollbar-view',
+    '.react-grid-layout',
+    'main',
+    'body'
+];
 
 console.log("Script grafana_pdf.js started...");
 
@@ -10,6 +29,7 @@ const url = args[0];
 const auth_string = args[1];
 const widthArg = args.find(arg => arg.startsWith('--pdfWidthPx='));
 const heightArg = args.find(arg => arg.startsWith('--pdfHeightPx='));
+const maxPageHeightArg = args.find(arg => arg.startsWith('--pdfMaxPageHeightPx='));
 const useServiceAccount = process.env.GRAFANA_SERVICE_ACCOUNT === 'true';
 let outfile = null;
 
@@ -18,8 +38,16 @@ const envHeight = process.env.PDF_HEIGHT_PX;
 const overrideHeight = heightArg
     ? parseInt(heightArg.split('=')[1], 10)
     : (envHeight && envHeight !== 'auto') ? parseInt(envHeight, 10) : null;
+
+// Max page height for multi-page PDF output
+const envMaxPageHeight = process.env.PDF_MAX_PAGE_HEIGHT_PX;
+const maxPageHeight = maxPageHeightArg
+    ? parseInt(maxPageHeightArg.split('=')[1], 10)
+    : (envMaxPageHeight && envMaxPageHeight !== 'auto' && envMaxPageHeight !== '') ? parseInt(envMaxPageHeight, 10) : null;
+
 console.log("PDF width set to:", width_px);
 console.log("PDF height set to:", overrideHeight !== null ? overrideHeight : "auto (auto-detected)");
+console.log("PDF max page height set to:", maxPageHeight !== null ? maxPageHeight : "disabled (single page)");
 
 const auth_header = useServiceAccount ? 'Bearer ' + auth_string : 'Basic ' + Buffer.from(auth_string).toString('base64');
 console.log("Using authentication:",  useServiceAccount ? "Service Account" : "Basic Auth");
@@ -937,28 +965,130 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
 
         await page.emulateMediaType('screen');
 
-        await page.addStyleTag({
-            content: `
-                html, body {
-                  height: auto !important;
-                  overflow: visible !important;
-                  -webkit-print-color-adjust: exact !important;
-                  print-color-adjust: exact !important;
-                }
-                @page { size: ${width_px}px ${pdfHeight}px; margin: 0; }
-            `
-        });
+        // Multi-page PDF generation when maxPageHeight is set
+        if (maxPageHeight && maxPageHeight > 0) {
+            console.log(`Multi-page PDF mode enabled with max page height: ${maxPageHeight}px`);
+            
+            // Step 1: Generate a single tall PDF with full content
+            await page.addStyleTag({
+                content: `
+                    html, body {
+                      height: auto !important;
+                      overflow: visible !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
+                    }
+                    @page { size: ${width_px}px ${pdfHeight}px; margin: 0; }
+                `
+            });
+            
+            const tempPdfPath = outfile.replace('.pdf', '_temp_full.pdf');
+            
+            await page.pdf({
+                path: tempPdfPath,
+                width: width_px + 'px',
+                height: pdfHeight + 'px',
+                printBackground: true,
+                scale: 1,
+                displayHeaderFooter: false,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 }
+            });
+            
+            console.log(`Generated temporary tall PDF: ${tempPdfPath} (height: ${pdfHeight}px)`);
+            
+            // Step 2: Load the tall PDF to get its actual dimensions
+            const tallPdfBytes = fs.readFileSync(tempPdfPath);
+            const tallPdf = await PDFDocument.load(tallPdfBytes);
+            const tallPage = tallPdf.getPages()[0];
+            const { width: pdfPageWidth, height: pdfPageHeight } = tallPage.getSize();
+            
+            console.log(`Tall PDF dimensions: ${pdfPageWidth}x${pdfPageHeight}`);
+            
+            // Step 3: Calculate page regions based on max page height
+            // Scale the max page height proportionally to the PDF coordinates
+            const scaleY = pdfPageHeight / pdfHeight;
+            const scaledMaxPageHeight = maxPageHeight * scaleY;
+            console.log(`Browser height: ${pdfHeight}px, PDF height: ${pdfPageHeight}px, scale: ${scaleY}`);
+            console.log(`Max page height: ${maxPageHeight}px browser -> ${scaledMaxPageHeight}px PDF`);
+            
+            // Calculate page breaks at regular intervals
+            const pageRegions = [];
+            let currentStart = 0;
+            
+            while (currentStart < pdfPageHeight) {
+                const currentEnd = Math.min(currentStart + scaledMaxPageHeight, pdfPageHeight);
+                pageRegions.push({
+                    start: currentStart,
+                    end: currentEnd
+                });
+                currentStart = currentEnd;
+            }
+            
+            console.log(`Splitting into ${pageRegions.length} pages`);
+            
+            // Step 4: Create new PDF with multiple pages
+            const newPdf = await PDFDocument.create();
+            
+            for (let i = 0; i < pageRegions.length; i++) {
+                const region = pageRegions[i];
+                const regionHeight = region.end - region.start;
+                
+                // In PDF coordinates, Y starts from bottom
+                // region.start is from top (0 = top of document)
+                // We need to calculate the Y offset from the bottom of the tall page
+                const yOffsetFromBottom = pdfPageHeight - region.end;
+                
+                console.log(`Page ${i + 1}: top=${region.start.toFixed(0)}px, bottom=${region.end.toFixed(0)}px, height=${regionHeight.toFixed(0)}px, yOffset=${yOffsetFromBottom.toFixed(0)}px`);
+                
+                // Embed the tall page
+                const [embeddedPage] = await newPdf.embedPdf(tallPdf, [0]);
+                
+                // Create a new page with the target dimensions
+                const newPage = newPdf.addPage([pdfPageWidth, regionHeight]);
+                
+                // Draw the embedded page, offset to show the correct region
+                // The embedded page is drawn from its bottom-left corner
+                // We position it so the visible region is within our new page
+                newPage.drawPage(embeddedPage, {
+                    x: 0,
+                    y: -yOffsetFromBottom,
+                    width: pdfPageWidth,
+                    height: pdfPageHeight
+                });
+            }
+            
+            // Save the split PDF
+            const newPdfBytes = await newPdf.save();
+            fs.writeFileSync(outfile, newPdfBytes);
+            
+            // Clean up temp file
+            try { fs.unlinkSync(tempPdfPath); } catch (e) { }
+            
+            console.log(`Multi-page PDF generated with ${pageRegions.length} pages`);
+        } else {
+            // Original single-page PDF generation
+            await page.addStyleTag({
+                content: `
+                    html, body {
+                      height: auto !important;
+                      overflow: visible !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
+                    }
+                    @page { size: ${width_px}px ${pdfHeight}px; margin: 0; }
+                `
+            });
 
-
-        await page.pdf({
-            path: outfile,
-            width: width_px + 'px',
-            height: pdfHeight + 'px',
-            printBackground: true,
-            scale: 1,
-            displayHeaderFooter: false,
-            margin: {top: 0, right: 0, bottom: 0, left: 0}
-        });
+            await page.pdf({
+                path: outfile,
+                width: width_px + 'px',
+                height: pdfHeight + 'px',
+                printBackground: true,
+                scale: 1,
+                displayHeaderFooter: false,
+                margin: {top: 0, right: 0, bottom: 0, left: 0}
+            });
+        }
         console.log(`PDF generated: ${outfile}`);
 
         await browser.close();

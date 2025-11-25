@@ -10,6 +10,7 @@ GF_FROM=""
 GF_TO=""
 GF_PDF_WIDTH_PX=""
 GF_PDF_HEIGHT_PX=""
+GF_PDF_MAX_PAGE_HEIGHT_PX=""
 
 # Check arguments
 while [ "$1" != "" ]; do
@@ -21,6 +22,7 @@ while [ "$1" != "" ]; do
             GF_TO )                 shift; GF_TO=$1 ;;
             GF_PDF_WIDTH_PX )              shift; GF_PDF_WIDTH_PX=$1 ;;
             GF_PDF_HEIGHT_PX )             shift; GF_PDF_HEIGHT_PX=$1 ;;
+            GF_PDF_MAX_PAGE_HEIGHT_PX )    shift; GF_PDF_MAX_PAGE_HEIGHT_PX=$1 ;;
             * )                     echo "Option $1 not recognized"; exit 1 ;;
         esac
     shift
@@ -42,6 +44,7 @@ JSON_PAYLOAD="{\"url\": \"${GF_DASH_URL}\""
 [ -n "$GF_TO" ]     && JSON_PAYLOAD="${JSON_PAYLOAD}, \"to\": \"${GF_TO}\""
 [ -n "$GF_PDF_WIDTH_PX" ]  && JSON_PAYLOAD="${JSON_PAYLOAD}, \"pdfWidthPx\": \"${GF_PDF_WIDTH_PX}\""
 [ -n "$GF_PDF_HEIGHT_PX" ] && JSON_PAYLOAD="${JSON_PAYLOAD}, \"pdfHeightPx\": \"${GF_PDF_HEIGHT_PX}\""
+[ -n "$GF_PDF_MAX_PAGE_HEIGHT_PX" ] && JSON_PAYLOAD="${JSON_PAYLOAD}, \"pdfMaxPageHeightPx\": \"${GF_PDF_MAX_PAGE_HEIGHT_PX}\""
 JSON_PAYLOAD="${JSON_PAYLOAD}}"
 
 # Send the HTTP POST request to the Node.js server to generate the PDF

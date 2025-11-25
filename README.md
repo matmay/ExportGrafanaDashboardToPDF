@@ -150,6 +150,38 @@ curl \
 docker exec -it grafana-export-to-pdf /usr/src/app/generate-pdf.sh GF_DASH_URL 'http://your-grafana-server/d/your-dashboard-id' GF_PDF_WIDTH_PX 1920 GF_PDF_HEIGHT_PX 1080
 ```
 
+### Multi-Page PDF Export
+
+By default, the PDF export generates a single tall page containing the entire dashboard. If you prefer to have multiple pages with a maximum height per page, you can use the `PDF_MAX_PAGE_HEIGHT_PX` variable.
+
+When set, the exporter will:
+1. Calculate page breaks based on panel boundaries
+2. Move panels that don't fit on the current page to the next page (panels are never split across pages)
+3. Generate a multi-page PDF
+
+#### Configuration via `.env` file
+```dotenv
+PDF_MAX_PAGE_HEIGHT_PX=1080
+```
+
+> Leave empty or unset to disable multi-page output and generate a single tall page (default behavior).
+
+#### Using cURL
+```bash
+curl \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{ "url": "http://your-grafana-server/d/your-dashboard-id", "pdfMaxPageHeightPx": 1080}' \
+  http://localhost:3001/generate-pdf
+```
+
+#### Using the `generate-pdf.sh` shell script
+```bash
+docker exec -it grafana-export-to-pdf /usr/src/app/generate-pdf.sh GF_DASH_URL 'http://your-grafana-server/d/your-dashboard-id' GF_PDF_MAX_PAGE_HEIGHT_PX 1080
+```
+
+> **Note:** If a single panel is taller than the maximum page height, it will be placed on its own page and may exceed the limit. This is by design to ensure panels are never cut off.
+
 ### Generating a PDF with only a specific panel
 
 By default, the server exports the entire dashboard. If you want to export a single panel, you can add the `viewPanel` parameter to the URL.

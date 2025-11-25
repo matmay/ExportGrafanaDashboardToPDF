@@ -10,6 +10,7 @@ const url = args[0];
 const auth_string = args[1];
 const widthArg = args.find(arg => arg.startsWith('--pdfWidthPx='));
 const heightArg = args.find(arg => arg.startsWith('--pdfHeightPx='));
+const maxPageHeightArg = args.find(arg => arg.startsWith('--pdfMaxPageHeightPx='));
 const useServiceAccount = process.env.GRAFANA_SERVICE_ACCOUNT === 'true';
 let outfile = null;
 
@@ -18,8 +19,16 @@ const envHeight = process.env.PDF_HEIGHT_PX;
 const overrideHeight = heightArg
     ? parseInt(heightArg.split('=')[1], 10)
     : (envHeight && envHeight !== 'auto') ? parseInt(envHeight, 10) : null;
+
+// Max page height for multi-page PDF output
+const envMaxPageHeight = process.env.PDF_MAX_PAGE_HEIGHT_PX;
+const maxPageHeight = maxPageHeightArg
+    ? parseInt(maxPageHeightArg.split('=')[1], 10)
+    : (envMaxPageHeight && envMaxPageHeight !== 'auto' && envMaxPageHeight !== '') ? parseInt(envMaxPageHeight, 10) : null;
+
 console.log("PDF width set to:", width_px);
 console.log("PDF height set to:", overrideHeight !== null ? overrideHeight : "auto (auto-detected)");
+console.log("PDF max page height set to:", maxPageHeight !== null ? maxPageHeight : "disabled (single page)");
 
 const auth_header = useServiceAccount ? 'Bearer ' + auth_string : 'Basic ' + Buffer.from(auth_string).toString('base64');
 console.log("Using authentication:",  useServiceAccount ? "Service Account" : "Basic Auth");
@@ -937,28 +946,184 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
 
         await page.emulateMediaType('screen');
 
-        await page.addStyleTag({
-            content: `
-                html, body {
-                  height: auto !important;
-                  overflow: visible !important;
-                  -webkit-print-color-adjust: exact !important;
-                  print-color-adjust: exact !important;
+        // Multi-page PDF generation when maxPageHeight is set
+        if (maxPageHeight && maxPageHeight > 0) {
+            console.log(`Multi-page PDF mode enabled with max page height: ${maxPageHeight}px`);
+            
+            // Get panel boundaries for smart page breaks
+            const panelBoundaries = await page.evaluate(() => {
+                const panelSelectors = [
+                    '[data-testid="panel"]',
+                    '.panel-container',
+                    '.react-grid-item',
+                    '.dashboard-panel'
+                ];
+                
+                let panels = [];
+                for (const selector of panelSelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    if (elements && elements.length > 0) {
+                        panels = Array.from(elements);
+                        console.log(`Using ${selector} for panel boundaries, found ${panels.length} panels`);
+                        break;
+                    }
                 }
-                @page { size: ${width_px}px ${pdfHeight}px; margin: 0; }
-            `
-        });
+                
+                if (panels.length === 0) {
+                    console.log("No panels found, will use simple page breaks");
+                    return [];
+                }
+                
+                return panels.map((panel, idx) => {
+                    const rect = panel.getBoundingClientRect();
+                    return {
+                        index: idx,
+                        top: rect.top,
+                        bottom: rect.bottom,
+                        height: rect.height
+                    };
+                }).sort((a, b) => a.top - b.top);
+            });
+            
+            console.log(`Found ${panelBoundaries.length} panels for page break calculation`);
+            
+            // Calculate page breaks based on panel boundaries
+            const pageBreaks = [];
+            let currentPageStart = 0;
+            
+            if (panelBoundaries.length > 0) {
+                for (let i = 0; i < panelBoundaries.length; i++) {
+                    const panel = panelBoundaries[i];
+                    const panelEndOnPage = panel.bottom - currentPageStart;
+                    
+                    // If this panel would exceed the max page height
+                    if (panelEndOnPage > maxPageHeight) {
+                        // If panel starts after some content, break before this panel
+                        if (panel.top > currentPageStart) {
+                            pageBreaks.push(panel.top);
+                            currentPageStart = panel.top;
+                        }
+                        // If single panel is taller than max page height, include it on its own page
+                        // (can't split a panel, so it will exceed the limit)
+                    }
+                }
+            }
+            
+            // Calculate actual page heights
+            const pages = [];
+            let lastBreak = 0;
+            for (const breakPoint of pageBreaks) {
+                if (breakPoint > lastBreak) {
+                    pages.push({ start: lastBreak, height: breakPoint - lastBreak });
+                    lastBreak = breakPoint;
+                }
+            }
+            // Add the last page
+            if (lastBreak < pdfHeight) {
+                pages.push({ start: lastBreak, height: pdfHeight - lastBreak });
+            }
+            
+            // If no pages calculated (no panels or all fit on one page), use simple pagination
+            if (pages.length === 0) {
+                const numPages = Math.ceil(pdfHeight / maxPageHeight);
+                for (let i = 0; i < numPages; i++) {
+                    const start = i * maxPageHeight;
+                    const height = Math.min(maxPageHeight, pdfHeight - start);
+                    pages.push({ start, height });
+                }
+            }
+            
+            console.log(`Calculated ${pages.length} pages for PDF output`);
+            
+            // Generate multi-page PDF by setting page breaks via CSS
+            // We'll use CSS break-before/break-after and fixed page heights
+            await page.addStyleTag({
+                content: `
+                    html, body {
+                      height: auto !important;
+                      overflow: visible !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
+                    }
+                    @page { size: ${width_px}px ${maxPageHeight}px; margin: 0; }
+                `
+            });
+            
+            // Inject page break markers at calculated positions
+            if (pageBreaks.length > 0) {
+                await page.evaluate((breaks) => {
+                    // Find the main scrollable content container
+                    const containerSelectors = [
+                        '#pageContent div[class*="canvas-wrapper-old"]',
+                        '[data-testid="dashboard-grid"]',
+                        '[data-testid="scrollbar-view"]',
+                        '.scrollbar-view',
+                        '.react-grid-layout',
+                        'main',
+                        'body'
+                    ];
+                    
+                    let container = null;
+                    for (const selector of containerSelectors) {
+                        container = document.querySelector(selector);
+                        if (container) break;
+                    }
+                    
+                    if (!container) container = document.body;
+                    
+                    // Insert page break divs at the calculated positions
+                    for (const breakY of breaks) {
+                        const pageBreakDiv = document.createElement('div');
+                        pageBreakDiv.style.cssText = `
+                            position: absolute;
+                            left: 0;
+                            top: ${breakY}px;
+                            width: 100%;
+                            height: 0;
+                            page-break-before: always;
+                            break-before: page;
+                        `;
+                        pageBreakDiv.className = 'pdf-page-break';
+                        container.appendChild(pageBreakDiv);
+                    }
+                    
+                    console.log(`Inserted ${breaks.length} page break markers`);
+                }, pageBreaks);
+            }
+            
+            await page.pdf({
+                path: outfile,
+                width: width_px + 'px',
+                height: maxPageHeight + 'px',
+                printBackground: true,
+                scale: 1,
+                displayHeaderFooter: false,
+                margin: {top: 0, right: 0, bottom: 0, left: 0}
+            });
+        } else {
+            // Original single-page PDF generation
+            await page.addStyleTag({
+                content: `
+                    html, body {
+                      height: auto !important;
+                      overflow: visible !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
+                    }
+                    @page { size: ${width_px}px ${pdfHeight}px; margin: 0; }
+                `
+            });
 
-
-        await page.pdf({
-            path: outfile,
-            width: width_px + 'px',
-            height: pdfHeight + 'px',
-            printBackground: true,
-            scale: 1,
-            displayHeaderFooter: false,
-            margin: {top: 0, right: 0, bottom: 0, left: 0}
-        });
+            await page.pdf({
+                path: outfile,
+                width: width_px + 'px',
+                height: pdfHeight + 'px',
+                printBackground: true,
+                scale: 1,
+                displayHeaderFooter: false,
+                margin: {top: 0, right: 0, bottom: 0, left: 0}
+            });
+        }
         console.log(`PDF generated: ${outfile}`);
 
         await browser.close();

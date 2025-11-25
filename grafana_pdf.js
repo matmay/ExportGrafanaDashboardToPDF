@@ -968,97 +968,125 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
         if (maxPageHeight && maxPageHeight > 0) {
             console.log(`Multi-page PDF mode enabled with max page height: ${maxPageHeight}px`);
             
-            // Get panel boundaries for smart page breaks using absolute document coordinates
-            const panelBoundaries = await page.evaluate((selectors) => {
+            // Apply page break logic by adding margin-top to panels that would be split
+            const adjustmentResult = await page.evaluate((selectors, maxHeight) => {
                 // Helper function to get absolute position in document
                 function getAbsoluteTop(element) {
                     let top = 0;
-                    while (element) {
-                        top += element.offsetTop;
-                        element = element.offsetParent;
+                    let el = element;
+                    while (el) {
+                        top += el.offsetTop;
+                        el = el.offsetParent;
                     }
                     return top;
                 }
                 
                 let panels = [];
+                let usedSelector = '';
                 for (const selector of selectors) {
                     const elements = document.querySelectorAll(selector);
                     if (elements && elements.length > 0) {
                         panels = Array.from(elements);
+                        usedSelector = selector;
                         console.log(`Using ${selector} for panel boundaries, found ${panels.length} panels`);
                         break;
                     }
                 }
                 
                 if (panels.length === 0) {
-                    console.log("No panels found, will use simple page breaks");
-                    return [];
+                    console.log("No panels found, cannot apply smart page breaks");
+                    return { panelCount: 0, adjustments: 0, totalAddedMargin: 0 };
                 }
                 
-                return panels.map((panel, idx) => {
-                    const absoluteTop = getAbsoluteTop(panel);
-                    const height = panel.offsetHeight;
-                    return {
-                        index: idx,
-                        top: absoluteTop,
-                        bottom: absoluteTop + height,
-                        height: height
-                    };
-                }).sort((a, b) => a.top - b.top);
-            }, PANEL_SELECTORS);
-            
-            console.log(`Found ${panelBoundaries.length} panels for page break calculation`);
-            
-            // Calculate page breaks based on panel boundaries
-            const pageBreaks = [];
-            let currentPageStart = 0;
-            
-            if (panelBoundaries.length > 0) {
-                for (let i = 0; i < panelBoundaries.length; i++) {
-                    const panel = panelBoundaries[i];
-                    const panelEndOnPage = panel.bottom - currentPageStart;
+                // Get panel info with their DOM elements
+                const panelInfo = panels.map((panel, idx) => ({
+                    element: panel,
+                    index: idx,
+                    top: getAbsoluteTop(panel),
+                    height: panel.offsetHeight,
+                    bottom: getAbsoluteTop(panel) + panel.offsetHeight
+                })).sort((a, b) => a.top - b.top);
+                
+                // Calculate which panels need to be pushed to next page
+                let currentPageStart = 0;
+                let totalAddedMargin = 0;
+                let adjustments = 0;
+                
+                for (let i = 0; i < panelInfo.length; i++) {
+                    const panel = panelInfo[i];
+                    // Adjust positions based on previously added margins
+                    const adjustedTop = panel.top + totalAddedMargin;
+                    const adjustedBottom = panel.bottom + totalAddedMargin;
                     
-                    // If this panel would exceed the max page height
-                    if (panelEndOnPage > maxPageHeight) {
-                        // If panel starts after some content, break before this panel
-                        if (panel.top > currentPageStart) {
-                            pageBreaks.push(panel.top);
-                            currentPageStart = panel.top;
-                        }
-                        // If single panel is taller than max page height, include it on its own page
-                        // (can't split a panel, so it will exceed the limit)
+                    // Calculate position relative to current page
+                    const positionOnPage = adjustedTop - currentPageStart;
+                    const endPositionOnPage = adjustedBottom - currentPageStart;
+                    
+                    // If panel starts on current page but ends beyond max height
+                    if (positionOnPage < maxHeight && endPositionOnPage > maxHeight) {
+                        // Calculate margin needed to push this panel to next page
+                        const marginNeeded = maxHeight - positionOnPage;
+                        
+                        // Apply margin-top to push panel to next page
+                        const currentMargin = parseInt(window.getComputedStyle(panel.element).marginTop) || 0;
+                        panel.element.style.marginTop = (currentMargin + marginNeeded) + 'px';
+                        
+                        // Also apply page-break-before to help browsers
+                        panel.element.style.pageBreakBefore = 'always';
+                        panel.element.style.breakBefore = 'page';
+                        
+                        totalAddedMargin += marginNeeded;
+                        adjustments++;
+                        
+                        // Update current page start
+                        currentPageStart = adjustedTop + marginNeeded;
+                        
+                        console.log(`Panel ${i}: pushed to next page with margin ${marginNeeded}px`);
+                    }
+                    // If panel is completely on a new page (after previous adjustments)
+                    else if (positionOnPage >= maxHeight) {
+                        // Move to next page
+                        currentPageStart = Math.floor(adjustedTop / maxHeight) * maxHeight;
                     }
                 }
-            }
+                
+                // Also apply page-break-inside: avoid to all panels
+                panels.forEach(panel => {
+                    panel.style.pageBreakInside = 'avoid';
+                    panel.style.breakInside = 'avoid';
+                });
+                
+                return { 
+                    panelCount: panels.length, 
+                    adjustments: adjustments,
+                    totalAddedMargin: totalAddedMargin,
+                    usedSelector: usedSelector
+                };
+            }, PANEL_SELECTORS, maxPageHeight);
             
-            // Calculate actual page heights
-            const pages = [];
-            let lastBreak = 0;
-            for (const breakPoint of pageBreaks) {
-                if (breakPoint > lastBreak) {
-                    pages.push({ start: lastBreak, height: breakPoint - lastBreak });
-                    lastBreak = breakPoint;
-                }
-            }
-            // Add the last page
-            if (lastBreak < pdfHeight) {
-                pages.push({ start: lastBreak, height: pdfHeight - lastBreak });
-            }
+            console.log(`Panel adjustment result: ${JSON.stringify(adjustmentResult)}`);
             
-            // If no pages calculated (no panels or all fit on one page), use simple pagination
-            if (pages.length === 0) {
-                const numPages = Math.ceil(pdfHeight / maxPageHeight);
-                for (let i = 0; i < numPages; i++) {
-                    const start = i * maxPageHeight;
-                    const height = Math.min(maxPageHeight, pdfHeight - start);
-                    pages.push({ start, height });
-                }
-            }
+            // Recalculate final height after adjustments
+            const adjustedHeight = await page.evaluate(() => {
+                return Math.max(
+                    document.body.scrollHeight,
+                    document.documentElement.scrollHeight,
+                    document.body.offsetHeight,
+                    document.documentElement.offsetHeight
+                );
+            });
             
-            console.log(`Calculated ${pages.length} pages for PDF output`);
+            console.log(`Adjusted content height: ${adjustedHeight}px`);
             
-            // Generate multi-page PDF by setting page breaks via CSS
-            // We'll use CSS break-before/break-after and fixed page heights
+            // Update viewport with new height
+            await page.setViewport({
+                width: width_px,
+                height: adjustedHeight,
+                deviceScaleFactor: 2,
+                isMobile: false
+            });
+            
+            // Apply CSS for multi-page PDF
             await page.addStyleTag({
                 content: `
                     html, body {
@@ -1067,40 +1095,16 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
                       -webkit-print-color-adjust: exact !important;
                       print-color-adjust: exact !important;
                     }
-                    @page { size: ${width_px}px ${maxPageHeight}px; margin: 0; }
+                    @page { 
+                      size: ${width_px}px ${maxPageHeight}px; 
+                      margin: 0; 
+                    }
+                    .react-grid-item, .panel-container, [data-testid="panel"], .dashboard-panel {
+                      page-break-inside: avoid !important;
+                      break-inside: avoid !important;
+                    }
                 `
             });
-            
-            // Inject page break markers at calculated positions
-            if (pageBreaks.length > 0) {
-                await page.evaluate((breaks, containerSelectors) => {
-                    let container = null;
-                    for (const selector of containerSelectors) {
-                        container = document.querySelector(selector);
-                        if (container) break;
-                    }
-                    
-                    if (!container) container = document.body;
-                    
-                    // Insert page break divs at the calculated positions
-                    for (const breakY of breaks) {
-                        const pageBreakDiv = document.createElement('div');
-                        pageBreakDiv.style.cssText = `
-                            position: absolute;
-                            left: 0;
-                            top: ${breakY}px;
-                            width: 100%;
-                            height: 0;
-                            page-break-before: always;
-                            break-before: page;
-                        `;
-                        pageBreakDiv.className = 'pdf-page-break';
-                        container.appendChild(pageBreakDiv);
-                    }
-                    
-                    console.log(`Inserted ${breaks.length} page break markers`);
-                }, pageBreaks, CONTAINER_SELECTORS);
-            }
             
             await page.pdf({
                 path: outfile,

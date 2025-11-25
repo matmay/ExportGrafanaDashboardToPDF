@@ -996,127 +996,49 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
             
             console.log(`Generated temporary tall PDF: ${tempPdfPath} (height: ${pdfHeight}px)`);
             
-            // Step 2: Get panel boundaries for smart page breaks
-            const panelBoundaries = await page.evaluate((selectors) => {
-                let panels = [];
-                let usedSelector = '';
-                for (const selector of selectors) {
-                    const elements = document.querySelectorAll(selector);
-                    if (elements && elements.length > 0) {
-                        panels = Array.from(elements);
-                        usedSelector = selector;
-                        break;
-                    }
-                }
-                
-                if (panels.length === 0) {
-                    return { panels: [], usedSelector: '' };
-                }
-                
-                const panelInfo = panels.map((panel, idx) => {
-                    const rect = panel.getBoundingClientRect();
-                    return {
-                        index: idx,
-                        top: rect.top + window.scrollY,
-                        bottom: rect.bottom + window.scrollY,
-                        height: rect.height
-                    };
-                }).sort((a, b) => a.top - b.top);
-                
-                return { panels: panelInfo, usedSelector };
-            }, PANEL_SELECTORS);
-            
-            console.log(`Found ${panelBoundaries.panels.length} panels using selector: ${panelBoundaries.usedSelector}`);
-            if (panelBoundaries.panels.length > 0) {
-                console.log(`Panel positions (browser coords): ${JSON.stringify(panelBoundaries.panels.slice(0, 5))}...`);
-            }
-            
-            // Step 3: Load the tall PDF to get its actual dimensions
+            // Step 2: Load the tall PDF to get its actual dimensions
             const tallPdfBytes = fs.readFileSync(tempPdfPath);
             const tallPdf = await PDFDocument.load(tallPdfBytes);
             const tallPage = tallPdf.getPages()[0];
             const { width: pdfPageWidth, height: pdfPageHeight } = tallPage.getSize();
             
             console.log(`Tall PDF dimensions: ${pdfPageWidth}x${pdfPageHeight}`);
-            console.log(`Browser content height: ${pdfHeight}px`);
             
-            // Calculate scale factor between browser coordinates and PDF coordinates
-            // PDF coordinates might differ from browser coordinates due to DPI/scaling
+            // Step 3: Calculate page regions based on max page height
+            // Scale the max page height proportionally to the PDF coordinates
             const scaleY = pdfPageHeight / pdfHeight;
-            console.log(`Scale factor Y: ${scaleY}`);
-            
-            // Scale panel boundaries to PDF coordinates
-            const scaledPanels = panelBoundaries.panels.map(panel => ({
-                index: panel.index,
-                top: panel.top * scaleY,
-                bottom: panel.bottom * scaleY,
-                height: panel.height * scaleY
-            }));
-            
-            // Also scale maxPageHeight to PDF coordinates
             const scaledMaxPageHeight = maxPageHeight * scaleY;
-            console.log(`Scaled max page height: ${scaledMaxPageHeight}px (PDF coords)`);
+            console.log(`Browser height: ${pdfHeight}px, PDF height: ${pdfPageHeight}px, scale: ${scaleY}`);
+            console.log(`Max page height: ${maxPageHeight}px browser -> ${scaledMaxPageHeight}px PDF`);
             
-            // Step 4: Calculate smart page breaks that don't split panels (in PDF coordinates)
-            const pageRegions = []; // Array of { start, end } for each page (in PDF coordinates)
-            let currentPageStart = 0;
-            let currentPageEnd = scaledMaxPageHeight;
+            // Calculate page breaks at regular intervals
+            const pageRegions = [];
+            let currentStart = 0;
             
-            if (scaledPanels.length > 0) {
-                while (currentPageStart < pdfPageHeight) {
-                    // Find if any panel would be split at currentPageEnd
-                    let splitPanel = null;
-                    for (const panel of scaledPanels) {
-                        if (panel.top < currentPageEnd && panel.bottom > currentPageEnd) {
-                            splitPanel = panel;
-                            break;
-                        }
-                    }
-                    
-                    if (splitPanel) {
-                        // Move page end to before this panel
-                        currentPageEnd = splitPanel.top;
-                        console.log(`Adjusted page break to ${currentPageEnd}px (PDF coords) to avoid splitting panel`);
-                    }
-                    
-                    // Ensure we make progress (at least include one panel if it's larger than scaledMaxPageHeight)
-                    if (currentPageEnd <= currentPageStart) {
-                        currentPageEnd = currentPageStart + scaledMaxPageHeight;
-                    }
-                    
-                    pageRegions.push({
-                        start: currentPageStart,
-                        end: Math.min(currentPageEnd, pdfPageHeight)
-                    });
-                    
-                    currentPageStart = currentPageEnd;
-                    currentPageEnd = currentPageStart + scaledMaxPageHeight;
-                }
-            } else {
-                // No panels found, use simple page breaks
-                while (currentPageStart < pdfPageHeight) {
-                    pageRegions.push({
-                        start: currentPageStart,
-                        end: Math.min(currentPageStart + scaledMaxPageHeight, pdfPageHeight)
-                    });
-                    currentPageStart += scaledMaxPageHeight;
-                }
+            while (currentStart < pdfPageHeight) {
+                const currentEnd = Math.min(currentStart + scaledMaxPageHeight, pdfPageHeight);
+                pageRegions.push({
+                    start: currentStart,
+                    end: currentEnd
+                });
+                currentStart = currentEnd;
             }
             
-            console.log(`Calculated ${pageRegions.length} page regions (in PDF coordinates)`);
+            console.log(`Splitting into ${pageRegions.length} pages`);
             
-            // Step 5: Create new PDF with multiple pages
+            // Step 4: Create new PDF with multiple pages
             const newPdf = await PDFDocument.create();
             
             for (let i = 0; i < pageRegions.length; i++) {
                 const region = pageRegions[i];
                 const regionHeight = region.end - region.start;
                 
-                // In PDF coordinates, Y starts from bottom, so we need to invert
-                // region.start is from top, so we need: pdfPageHeight - region.end
-                const pdfYOffset = pdfPageHeight - region.end;
+                // In PDF coordinates, Y starts from bottom
+                // region.start is from top (0 = top of document)
+                // We need to calculate the Y offset from the bottom of the tall page
+                const yOffsetFromBottom = pdfPageHeight - region.end;
                 
-                console.log(`Page ${i + 1}: region ${region.start.toFixed(0)}-${region.end.toFixed(0)}px (PDF coords), height: ${regionHeight.toFixed(0)}px`);
+                console.log(`Page ${i + 1}: top=${region.start.toFixed(0)}px, bottom=${region.end.toFixed(0)}px, height=${regionHeight.toFixed(0)}px, yOffset=${yOffsetFromBottom.toFixed(0)}px`);
                 
                 // Embed the tall page
                 const [embeddedPage] = await newPdf.embedPdf(tallPdf, [0]);
@@ -1125,9 +1047,11 @@ console.log("Using authentication:",  useServiceAccount ? "Service Account" : "B
                 const newPage = newPdf.addPage([pdfPageWidth, regionHeight]);
                 
                 // Draw the embedded page, offset to show the correct region
+                // The embedded page is drawn from its bottom-left corner
+                // We position it so the visible region is within our new page
                 newPage.drawPage(embeddedPage, {
                     x: 0,
-                    y: -pdfYOffset,  // Offset to show correct region
+                    y: -yOffsetFromBottom,
                     width: pdfPageWidth,
                     height: pdfPageHeight
                 });
